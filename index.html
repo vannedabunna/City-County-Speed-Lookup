@@ -10,10 +10,9 @@
   <link
     rel="stylesheet"
     href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-    integrity="sha256-p4NxAoJBhIIN+hmNH; }
-
-    .panel {
-      position:absolute; top:10px; left:10px; z-index:1000; background:#fff;
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+0px; left:10px; z-index:1000; background:#fff;
       padding:12px 14px; border-radius:8px; box-shadow:0 2px 10px rgba(0,0,0,.2); width:330px;
       font: 13px system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
     }
@@ -50,6 +49,7 @@
     <div class="status" id="status"></div>
     <div class="results" id="results"></div>
     <div class="small">
+      Click the map to drop a red dot and look up the nearest road with a mapped speed limit.<br/>
       Source: OpenStreetMap via Overpass API. Coverage depends on local mapping; results may be incomplete or outdated.
     </div>
   </div>
@@ -57,7 +57,9 @@
   <!-- Leaflet JS -->
   <script
     src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1').setView([47.6062, -122.3321], 12);
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+ 1297], 12); // default: San Francisco
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
       attribution: '© OpenStreetMap contributors'
@@ -153,24 +155,51 @@
       return { ok:true, lat, lon };
     }
 
-    async function run(){
-      const coordInput = document.getElementById('latlon').value;
-      const radius = parseFloat(document.getElementById('rad').value) || 300;
+    // Parse maxspeed tag and return mph (number) + display text (rounded)
+    function parseMaxspeedToMph(tags){
+      const raw = (tags.maxspeed || '').toString().toLowerCase().trim();
+      const advisory = (tags['maxspeed:advisory'] || '').toString().toLowerCase().trim();
+      const candidate = raw || advisory;
+      if (!candidate) return { mphText: 'N/A' };
 
+      // Common non-numeric values in OSM
+      const nonNumeric = ['signals','variable','none','walk','unposted','national','implicit'];
+      if (nonNumeric.includes(candidate)) return { mphText: candidate.toUpperCase() };
+
+      // Extract number and units if present
+      const match = candidate.match(/([0-9]+(?:\\.[0-9]+)?)\\s*(mph|mi\\/h|km\\/h|kmh|kph)?/);
+      if (!match) return { mphText: candidate };
+      const value = parseFloat(match[1]);
+      const unit = (match[2] || '').toLowerCase();
+
+      let mph = value;
+      if (unit === 'km/h' || unit === 'kmh' || unit === 'kph') {
+        mph = value * 0.621371; // convert km/h to mph
+      } else if (unit === 'mph' || unit === 'mi/h') {
+        mph = value; // already mph
+      } else {
+        // Unit not specified: assume km/h (conservative)
+        mph = value * 0.621371;
+      }
+      return { mph, mphText: Math.round(mph) + ' mph' };
+    }
+
+    function showMarker(lat, lon){
+      if (pointMarker) map.removeLayer(pointMarker);
+      pointMarker = L.circleMarker([lat, lon], {
+        radius: 6, color: '#b91c1c', fillColor: '#ef4444', fillOpacity: 0.9, weight: 2
+      }).addTo(map);
+    }
+
+    async function lookupAt(lat, lon, radius){
       const status = document.getElementById('status');
       const resultsEl = document.getElementById('results');
       resultsEl.innerHTML = '';
 
-      const parsed = parseLatLon(coordInput);
-      if (!parsed.ok) { status.textContent = parsed.message; return; }
-      const { lat, lon } = parsed;
-
       status.textContent = 'Querying OpenStreetMap (local roads with maxspeed)…';
 
-      if (pointMarker) map.removeLayer(pointMarker);
-      if (nearestLine) map.removeLayer(nearestLine);
-
-      pointMarker = L.marker([lat, lon]).addTo(map);
+      if (nearestLine) { map.removeLayer(nearestLine); }
+      showMarker(lat, lon);
       map.setView([lat, lon], 15);
 
       try {
@@ -182,6 +211,7 @@
           return;
         }
 
+        // Compute nearest by simple distance to polyline vertices/midpoints
         const withDist = ways.map(w => {
           const coords = w.geometry.map(g => [g.lon, g.lat]);
           const d = lineDistanceToPoint(coords, lat, lon);
@@ -190,15 +220,17 @@
 
         const nearest = withDist[0];
         const w = nearest.way;
-        const speed = w.tags.maxspeed || 'N/A';
-        const name = w.tags.name || '(unnamed road)';
+        const speed = parseMaxspeedToMph(w.tags);
+        const roadName = w.tags.name || '(unnamed road)';
 
+        if (nearestLine) map.removeLayer(nearestLine);
         nearestLine = drawWay(w);
-        status.innerHTML = `Nearest local road: <b>${name}</b> · <b>${speed}</b> · ${nearest.dist.toFixed(0)} m away`;
+
+        status.innerHTML = `Nearest local road: <b>${roadName}</b> · <b>${speed.mphText}</b> · ${nearest.dist.toFixed(0)} m away`;
 
         const top = withDist.slice(0,5);
         resultsEl.innerHTML = top.map(({way, dist}) => {
-          const s = way.tags.maxspeed || 'N/A';
+          const s = parseMaxspeedToMph(way.tags).mphText;
           const n = way.tags.name || '(unnamed road)';
           return `<div class='result-item'><b>${n}</b><br/>Speed limit: <b>${s}</b><br/><span style='color:#555'>${dist.toFixed(0)} m away</span></div>`;
         }).join('');
@@ -208,10 +240,32 @@
       }
     }
 
-    document.getElementById('go').addEventListener('click', run);
+    function runFromTextbox(){
+      const coordInput = document.getElementById('latlon').value;
+      const radius = parseFloat(document.getElementById('rad').value) || 300;
+      const parsed = parseLatLon(coordInput);
+      if (!parsed.ok) {
+        document.getElementById('status').textContent = parsed.message;
+        return;
+      }
+      const { lat, lon } = parsed;
+      lookupAt(lat, lon, radius);
+    }
+
+    document.getElementById('go').addEventListener('click', runFromTextbox);
     ['latlon','rad'].forEach(id => {
-      document.getElementById(id).addEventListener('keydown', e => { if (e.key === 'Enter') run(); });
+      document.getElementById(id).addEventListener('keydown', e => { if (e.key === 'Enter') runFromTextbox(); });
+    });
+
+    // --- Map click: drop a red dot and look up ---
+    map.on('click', (e) => {
+      const radius = parseFloat(document.getElementById('rad').value) || 300;
+      const lat = e.latlng.lat;
+      const lon = e.latlng.lng;
+      document.getElementById('latlon').value = lat.toFixed(6) + ', ' + lon.toFixed(6);
+      lookupAt(lat, lon, radius);
     });
   </script>
 </body>
 </html>
+``
