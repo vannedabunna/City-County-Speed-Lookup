@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -9,22 +10,14 @@
   <link
     rel="stylesheet"
     href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
-    crossorigin=""
-  />
-
-  <style>
-    html, body { height: 100%; margin:0; }
-    #map { height: 100%; }
-
-    .panel {
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS{
       position:absolute; top:10px; left:10px; z-index:1000; background:#fff;
-      padding:12px 14px; border-radius:8px; box-shadow:0 2px 10px rgba(0,0,0,.2); width:330px;
+      padding:12px 14px; border-radius:8px; box-shadow:0 2px 10px rgba(0,0,0,.2); width:350px;
       font: 13px system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
     }
     .panel h2 { margin:0 0 8px; font-weight:600; font-size:16px; }
     .panel label { display:block; margin:6px 0 2px; font-size:12px; }
-    .panel input {
+    .panel input[type="text"], .panel input[type="number"] {
       width:100%; padding:6px 8px; border:1px solid #bbb; border-radius:4px; font-size:14px;
     }
     .panel button {
@@ -33,9 +26,20 @@
     }
     .panel button:hover { background:#15803d; }
     .status { font-size:12px; margin-top:6px; min-height:18px; }
-    .results { max-height: 180px; overflow:auto; margin-top:6px; font-size:12px; border-top:1px solid #eee; padding-top:6px; }
-    .result-item { padding:4px 0; border-bottom:1px dashed #eee; }
+    .results { max-height: 200px; overflow:auto; margin-top:6px; font-size:12px; border-top:1px solid #eee; padding-top:6px; }
+    .result-item { padding:6px 0; border-bottom:1px dashed #eee; cursor:pointer; }
+    .result-item:hover { background:#fafafa; }
     .small { font-size:11px; color:#444; margin-top:8px; }
+    .chk { font-size:12px; margin-top:6px; display:flex; align-items:center; gap:8px; }
+    .warn { color:#8a3a01; }
+    .legend {
+      margin-top:8px; border-top:1px solid #eee; padding-top:6px; font-size:11px; color:#333;
+    }
+    .swatch { display:inline-block; width:12px; height:12px; border-radius:2px; margin-right:6px; vertical-align:-2px; }
+    .pill {
+      display:inline-block; padding:2px 6px; font-size:11px; border-radius:999px; background:#eef2ff; color:#3730a3; margin-left:6px;
+      border:1px solid #c7d2fe;
+    }
   </style>
 </head>
 <body>
@@ -45,17 +49,37 @@
     <h2>City Street Speed Limit Lookup</h2>
 
     <label for="latlon">Coordinates (lat, lon)</label>
-    <input id="latlon" placeholder="e.g., 47.201036763018415, -121.9889471027125" />
+    <input id="latlon" type="text" placeholder="e.g., 47.201036763018415, -121.9889471027125" />
 
     <label for="rad">Search radius (meters)</label>
-    <input id="rad" value="300" />
+    <input id="rad" type="number" min="50" max="2000" step="10" value="300" />
+
+    <label class="chk">
+      <input type="checkbox" id="estimateDefaults" />
+      Estimate default speeds when missing (beta)
+    </label>
+    <div class="small warn">
+      ⚠️ Defaults vary by jurisdiction and context. Estimates may be inaccurate and are for reference only.
+    </div>
 
     <button id="go">Find nearest local-road speed</button>
 
-    <div class="status" id="status"></div>
+    <div class="status" id="status" aria-live="polite"></div>
     <div class="results" id="results"></div>
+
+    <div class="legend">
+      <div><span class="swatch" style="background:#0ea5e9"></span> ≤ 20 mph</div>
+      <div><span class="swatch" style="background:#22c55e"></span> 21–25 mph</div>
+      <div><span class="swatch" style="background:#f59e0b"></span> 26–35 mph</div>
+      <div><span class="swatch" style="background:#ef4444"></span> 36–45 mph</div>
+      <div><span class="swatch" style="background:#9333ea"></span> ≥ 46 mph</div>
+      <div class="small" style="margin-top:6px">
+        Solid colors are mapped <b>maxspeed</b>. Gray indicates unknown; “estimated” comes from heuristics when no posted speed is mapped.
+      </div>
+    </div>
+
     <div class="small">
-      Click anywhere on the map to drop a red dot and look up the nearest road with a mapped speed limit.<br/>
+      Click anywhere on the map to drop a red dot and look up the nearest road with a mapped or estimated speed.<br/>
       Source: OpenStreetMap via Overpass API. Coverage depends on local mapping; results may be incomplete or outdated.
     </div>
   </div>
@@ -64,18 +88,14 @@
   <script
     src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
     integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
-    crossorigin=""
-  ></script>
-
-  <script>
-    // --- Map bootstrap ---
-    const map = L.map('map').setView([37.773972, -122.431297], 12); // default: San Francisco
+    crossorigin22.431297], 12); // default: San Francisco
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
       attribution: '© OpenStreetMap contributors'
     }).addTo(map);
 
-    let pointMarker, nearestLine;
+    let pointMarker;
+    let drawnPolylines = [];
 
     // --- Overpass mirrors for resiliency ---
     const overpassEndpoints = [
@@ -84,65 +104,51 @@
       'https://overpass.openstreetmap.ru/api/interpreter'
     ];
 
-    // Build an Overpass query around a point, searching for roads with maxspeed
-    function buildQuery(lat, lon, radius) {
-      return `
-        [out:json][timeout:25];
-        way(around:${radius},${lat},${lon})["highway"]["maxspeed"];
-        out geom tags;
-      `;
+    // Global abort controller and cache
+    let currentAbort = null;
+    const responseCache = new Map(); // key: query text, value: json
+
+    // ------------------------------
+    // Utilities
+    // ------------------------------
+
+    // Project lat/lon to pseudo WebMercator meters (local accuracy is fine)
+    function projectToMeters(lat, lon) {
+      const R = 6378137;
+      const x = R * lon * Math.PI / 180;
+      const y = R * Math.log(Math.tan(Math.PI/4 + (lat * Math.PI / 180)/2));
+      return [x, y];
     }
 
-    // POST the query to Overpass (rotate through mirrors if one fails)
-    async function fetchOverpass(queryText) {
-      const body = 'data=' + encodeURIComponent(queryText);
-      for (const ep of overpassEndpoints) {
-        try {
-          const r = await fetch(ep, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body
-          });
-          if (!r.ok) throw new Error('HTTP ' + r.status);
-          return await r.json();
-        } catch (e) {
-          console.warn('Overpass endpoint failed, trying next:', ep, e);
-        }
+    // Accurate point-to-segment distance in meters (projected)
+    function pointToSegmentDist(lat, lon, lat1, lon1, lat2, lon2) {
+      const [px, py] = projectToMeters(lat, lon);
+      const [x1, y1] = projectToMeters(lat1, lon1);
+      const [x2, y2] = projectToMeters(lat2, lon2);
+
+      const dx = x2 - x1, dy = y2 - y1;
+      if (dx === 0 && dy === 0) {
+        const dxp = px - x1, dyp = py - y1;
+        return Math.sqrt(dxp*dxp + dyp*dyp);
       }
-      throw new Error('All Overpass endpoints failed. Try again later.');
+      let t = ((px - x1)*dx + (py - y1)*dy) / (dx*dx + dy*dy);
+      t = Math.max(0, Math.min(1, t));
+      const cx = x1 + t*dx, cy = y1 + t*dy;
+      const dxp = px - cx, dyp = py - cy;
+      return Math.sqrt(dxp*dxp + dyp*dyp);
     }
 
-    // Haversine distance (meters) between two lat/lon points
-    function haversine(lat1, lon1, lat2, lon2){
-      const R=6371000; const toRad = d=>d*Math.PI/180;
-      const dLat = toRad(lat2-lat1), dLon = toRad(lon2-lon1);
-      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
-      const c = 2*Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-      return R*c;
-    }
-
-    // Approximate nearest distance from point to a polyline by sampling endpoints + midpoint
-    function lineDistanceToPoint(coords, lat, lon){
+    // Nearest distance from point to a polyline
+    function lineDistanceToPoint(coords, lat, lon) {
+      // coords: [[lon,lat], ...]
       let best = Infinity;
-      for (let i=0; i<coords.length-1; i++){
+      for (let i = 0; i < coords.length - 1; i++) {
         const [lon1, lat1] = coords[i];
         const [lon2, lat2] = coords[i+1];
-        const midLat=(lat1+lat2)/2, midLon=(lon1+lon2)/2;
-        best = Math.min(
-          best,
-          haversine(lat,lon,lat1,lon1),
-          haversine(lat,lon,lat2,lon2),
-          haversine(lat,lon,midLat,midLon)
-        );
+        const d = pointToSegmentDist(lat, lon, lat1, lon1, lat2, lon2);
+        if (d < best) best = d;
       }
       return best;
-    }
-
-    function drawWay(way){
-      const coords = way.geometry.map(n => [n.lat, n.lon]);
-      const poly = L.polyline(coords, { color:'#e11d48', weight:4, opacity:0.9 });
-      poly.addTo(map);
-      return poly;
     }
 
     // Parse a single "lat, lon" input; accept commas or whitespace; allow parentheses
@@ -165,94 +171,336 @@
       return { ok:true, lat, lon };
     }
 
-    // Parse maxspeed tag and return mph (number) and display text
-    function parseMaxspeedToMph(tags){
-      const raw = (tags.maxspeed || '').toString().toLowerCase().trim();
-      const advisory = (tags['maxspeed:advisory'] || '').toString().toLowerCase().trim();
-      const candidate = raw || advisory;
-      if (!candidate) return { mphText: 'N/A' };
+    // Smarter maxspeed parsing with conditional/directional/advisory
+    function parseMaxspeedToMph(tags) {
+      const norm = s => (s || '').toString().trim().toLowerCase();
 
-      // Common non-numeric values in OSM
-      const nonNumeric = ['signals','variable','none','walk','unposted','national','implicit'];
-      if (nonNumeric.includes(candidate)) return { mphText: candidate.toUpperCase() };
+      const raw = norm(tags.maxspeed);
+      const forward = norm(tags['maxspeed:forward']);
+      const backward = norm(tags['maxspeed:backward']);
+      const conditional = norm(tags['maxspeed:conditional']);
+      const advisory = norm(tags['maxspeed:advisory']);
 
-      // Extract number and units if present
-      const match = candidate.match(/([0-9]+(?:\.[0-9]+)?)\s*(mph|mi\/h|km\/h|kmh|kph)?/);
-      if (!match) return { mphText: candidate };
-      const value = parseFloat(match[1]);
-      const unit = (match[2] || '').toLowerCase();
+      const candidates = [raw, forward, backward].filter(Boolean);
+      let chosen = candidates[0] || advisory || '';
 
-      let mph = value;
-      if (unit === 'km/h' || unit === 'kmh' || unit === 'kph') {
-        mph = value * 0.621371; // convert km/h to mph
-      } else if (unit === 'mph' || unit === 'mi/h') {
-        mph = value; // already mph
-      } else {
-        // Unit not specified: assume km/h (conservative)
-        mph = value * 0.621371;
+      const nonNumeric = new Set(['signals','variable','none','walk','unposted','national','implicit']);
+
+      const unitize = (val) => {
+        if (!val) return null;
+        if (nonNumeric.has(val)) return { mph: undefined, mphText: val.toUpperCase(), flags: { nonNumeric:true } };
+        const m = val.match(/([0-9]+(?:\.[0-9]+)?)\s*(mph|mi\/h|km\/h|kmh|kph)?/);
+        if (!m) return { mph: undefined, mphText: val };
+        const num = parseFloat(m[1]);
+        const unit = (m[2] || '').toLowerCase();
+        let mph = num;
+        if (unit === 'km/h' || unit === 'kmh' || unit === 'kph' || unit === '') {
+          // Assume km/h if unspecified
+          mph = num * 0.621371;
+        } else {
+          // mph or mi/h
+          mph = num;
+        }
+        return { mph, mphText: Math.round(mph) + ' mph' };
+      };
+
+      let base = unitize(chosen) || { mph: undefined, mphText: 'N/A' };
+      if (conditional) {
+        base.mphText += ` (conditional: ${conditional})`;
       }
-      return { mph: mph, mphText: Math.round(mph) + ' mph' };
+      if (!chosen && advisory) {
+        const adv = unitize(advisory);
+        base = { mph: adv.mph, mphText: (adv.mphText || advisory) + ' (advisory)' };
+      }
+      return base;
     }
 
-    function showMarker(lat, lon){
+    function showMarker(lat, lon) {
       if (pointMarker) map.removeLayer(pointMarker);
       pointMarker = L.circleMarker([lat, lon], {
         radius: 6, color: '#b91c1c', fillColor: '#ef4444', fillOpacity: 0.9, weight: 2
       }).addTo(map);
     }
 
-    async function lookupAt(lat, lon, radius){
+    function colorForSpeed(mph) {
+      if (!Number.isFinite(mph)) return '#6b7280'; // gray for unknown
+      if (mph <= 20) return '#0ea5e9';
+      if (mph <= 25) return '#22c55e';
+      if (mph <= 35) return '#f59e0b';
+      if (mph <= 45) return '#ef4444';
+      return '#9333ea';
+    }
+
+    function drawWayWithStyle(way, color = '#e11d48', weight = 4, opacity = 0.9) {
+      const coords = way.geometry.map(n => [n.lat, n.lon]);
+      const poly = L.polyline(coords, { color, weight, opacity });
+      poly.addTo(map);
+      return poly;
+    }
+
+    function clearPolylines() {
+      drawnPolylines.forEach(p => map.removeLayer(p));
+      drawnPolylines = [];
+    }
+
+    // ------------------------------
+    // Overpass: Query builders
+    // ------------------------------
+
+    // Local roads filter (excludes motorway/trunk/primary)
+    const LOCAL_ROAD_NEGATIVE = '["highway"!~"^(motorway|trunk|primary)$"]';
+    const LOCAL_ROAD_POSITIVE = '["highway"~"^(residential|living_street|unclassified|service|tertiary|secondary|track|road)$"]';
+
+    // Query roads within radius with maxspeed (local roads only)
+    function buildTaggedQuery(lat, lon, radius) {
+      return `
+        [out:json][timeout:25];
+        (
+          way(around:${radius},${lat},${lon})
+            ${LOCAL_ROAD_NEGATIVE}
+            ["highway"]
+            ["maxspeed"];
+        );
+        out tags geom;
+      `;
+    }
+
+    // Query local roads within radius regardless of maxspeed (for fallback/estimation)
+    function buildAllLocalQuery(lat, lon, radius) {
+      return `
+        [out:json][timeout:25];
+        (
+          way(around:${radius},${lat},${lon})
+            ${LOCAL_ROAD_NEGATIVE}
+            ["highway"];
+        );
+        out tags geom;
+      `;
+    }
+
+    // POST the query to Overpass (with cache + abort + timeout)
+    async function fetchOverpass(queryText) {
+      // Cache hit?
+      if (responseCache.has(queryText)) {
+        return responseCache.get(queryText);
+      }
+
+      const body = 'data=' + encodeURIComponent(queryText);
+      const timeoutMs = 15000;
+
+      // Cancel previous
+      if (currentAbort) currentAbort.abort();
+
+      for (const ep of overpassEndpoints) {
+        currentAbort = new AbortController();
+        const timer = setTimeout(() => currentAbort.abort(), timeoutMs);
+        try {
+          const r = await fetch(ep, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body,
+            signal: currentAbort.signal
+          });
+          clearTimeout(timer);
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          const json = await r.json();
+          responseCache.set(queryText, json);
+          return json;
+        } catch (e) {
+          clearTimeout(timer);
+          console.warn('Overpass endpoint failed, trying next:', ep, e);
+          // try next mirror
+        }
+      }
+      throw new Error('All Overpass endpoints failed. Try again later.');
+    }
+
+    // ------------------------------
+    // Default speed estimation (beta)
+    // ------------------------------
+
+    // Extremely conservative country guess (US bounding box only)
+    function guessCountryByBBox(lat, lon) {
+      // Rough CONUS bounds (excludes AK/HI): lon [-125,-66], lat [24,49]
+      if (lon >= -125 && lon <= -66 && lat >= 24 && lat <= 49) return 'US';
+      return null;
+    }
+
+    // Type-based rules (common OSM patterns). Expand as needed.
+    const TYPE_RULES = {
+      'US:residential': { mph: 25, note: 'typical US residential default' },
+      'US:urban':       { mph: 25, note: 'typical US urban default' },
+      'US:rural':       { mph: 55, note: 'typical US rural default' }
+    };
+
+    // Highway-class fallback (country-specific where possible). Expand cautiously.
+    const COUNTRY_RULES = {
+      'US': {
+        residential: { mph: 25, note: 'assumed US residential default' },
+        living_street: { mph: 15, note: 'assumed US living_street' },
+        service: { mph: 15, note: 'assumed US service road' },
+        unclassified: { mph: 35, note: 'assumed US unclassified' }
+      }
+      // Add more countries only if you have verified defaults.
+    };
+
+    function estimateDefaultMph(tags, lat, lon) {
+      const norm = s => (s || '').toString().trim();
+      const type = norm(tags['maxspeed:type']);
+      const src = norm(tags['source:maxspeed']);
+      const highway = (tags.highway || '').toString().trim();
+
+      // 1) If type/source matches known pattern (e.g., US:urban), use it.
+      const key = (type || src || '').toUpperCase();
+      if (key) {
+        const rule = TYPE_RULES[key];
+        if (rule) {
+          return { mph: rule.mph, reason: rule.note || `from ${key}`, estimated: true };
+        }
+      }
+
+      // 2) Country-specific highway class rule (only US via bbox to avoid wrong assumptions)
+      const country = guessCountryByBBox(lat, lon);
+      if (country && COUNTRY_RULES[country]) {
+        const classRule = COUNTRY_RULES[country][highway];
+        if (classRule) {
+          return { mph: classRule.mph, reason: classRule.note, estimated: true };
+        }
+      }
+
+      // No safe estimate
+      return { mph: undefined, reason: 'no rule', estimated: true };
+    }
+
+    // ------------------------------
+    // Main lookup flow
+    // ------------------------------
+
+    async function lookupAt(lat, lon, radius) {
       const status = document.getElementById('status');
       const resultsEl = document.getElementById('results');
+      const wantEstimate = document.getElementById('estimateDefaults').checked;
+
       resultsEl.innerHTML = '';
+      status.textContent = 'Querying OpenStreetMap (local roads)…';
 
-      status.textContent = 'Querying OpenStreetMap (local roads with maxspeed)…';
-
-      if (nearestLine) { map.removeLayer(nearestLine); }
+      clearPolylines();
       showMarker(lat, lon);
       map.setView([lat, lon], 15);
 
       try {
-        const data = await fetchOverpass(buildQuery(lat, lon, radius));
-        const ways = (data.elements || []).filter(el => el.type === 'way');
+        // First: tagged results (roads with maxspeed)
+        const taggedData = await fetchOverpass(buildTaggedQuery(lat, lon, radius));
+        const taggedWays = (taggedData.elements || []).filter(el => el.type === 'way');
 
-        if (ways.length === 0){
-          status.textContent = `No OSM roads with a mapped speed limit within ${radius} m.`;
+        // Build distances for tagged ways
+        const taggedWithDist = taggedWays.map(w => {
+          const coords = w.geometry.map(g => [g.lon, g.lat]);
+          const d = lineDistanceToPoint(coords, lat, lon);
+          const speed = parseMaxspeedToMph(w.tags);
+          return {
+            id: w.id,
+            way: w,
+            dist: d,
+            speedMph: speed.mph,
+            speedText: speed.mphText,
+            estimated: false
+          };
+        });
+
+        // Optionally: fetch all local roads to add estimated entries for those without maxspeed
+        let augmented = [...taggedWithDist];
+
+        if (wantEstimate) {
+          const allData = await fetchOverpass(buildAllLocalQuery(lat, lon, radius));
+          const allWays = (allData.elements || []).filter(el => el.type === 'way');
+          const knownIds = new Set(taggedWays.map(w => w.id));
+          const missing = allWays.filter(w => !knownIds.has(w.id));
+
+          const estimatedEntries = missing.map(w => {
+            const coords = w.geometry.map(g => [g.lon, g.lat]);
+            const d = lineDistanceToPoint(coords, lat, lon);
+            const est = estimateDefaultMph(w.tags, lat, lon);
+            let text;
+            if (Number.isFinite(est.mph)) {
+              text = Math.round(est.mph) + ' mph (estimated)';
+            } else {
+              text = 'Unknown (no rule)';
+            }
+            return {
+              id: w.id,
+              way: w,
+              dist: d,
+              speedMph: est.mph,
+              speedText: text,
+              estimated: true,
+              reason: est.reason
+            };
+          });
+
+          augmented = augmented.concat(estimatedEntries);
+        }
+
+        if (augmented.length === 0) {
+          status.textContent = `No local roads with a mapped speed limit within ${radius} m.`
+            + (wantEstimate ? ' No eligible roads found for estimation either.' : '');
           return;
         }
 
-        // Compute nearest by simple distance to polyline vertices/midpoints
-        const withDist = ways.map(w => {
-          const coords = w.geometry.map(g => [g.lon, g.lat]);
-          const d = lineDistanceToPoint(coords, lat, lon);
-          return { way:w, dist:d };
-        }).sort((a,b) => a.dist - b.dist);
+        // Sort by nearest
+        augmented.sort((a, b) => a.dist - b.dist);
 
-        const nearest = withDist[0];
-        const w = nearest.way;
-        const speed = parseMaxspeedToMph(w.tags);
-        const roadName = w.tags.name || '(unnamed road)';
+        // Top 5
+        const top = augmented.slice(0, 5);
 
-        if (nearestLine) map.removeLayer(nearestLine);
-        nearestLine = drawWay(w);
+        // Draw polylines with color by speed
+        const palette = ['#e11d48','#f97316','#0ea5e9','#22c55e','#8b5cf6'];
+        top.forEach((entry, idx) => {
+          const color = Number.isFinite(entry.speedMph) ? colorForSpeed(entry.speedMph) : '#6b7280';
+          const weight = idx === 0 ? 5 : 3;
+          const opacity = idx === 0 ? 1.0 : 0.75;
+          const pl = drawWayWithStyle(entry.way, color, weight, opacity);
+          drawnPolylines.push(pl);
+        });
 
-        status.innerHTML = `Nearest local road: <b>${roadName}</b> · <b>${speed.mphText}</b> · ${nearest.dist.toFixed(0)} m away`;
+        // Status line for nearest
+        const nearest = top[0];
+        const roadName = nearest.way.tags.name || '(unnamed road)';
+        const estPill = nearest.estimated ? `<span class="pill">estimated</span>` : '';
+        status.innerHTML = `Nearest local road: <b>${roadName}</b> · <b>${nearest.speedText}</b> ${estPill} · ${nearest.dist.toFixed(0)} m away`;
 
-        const top = withDist.slice(0,5);
-        resultsEl.innerHTML = top.map(({way, dist}) => {
-          const s = parseMaxspeedToMph(way.tags).mphText;
-          const n = way.tags.name || '(unnamed road)';
-          return `<div class='result-item'><b>${n}</b><br/>Speed limit: <b>${s}</b><br/><span style='color:#555'>${dist.toFixed(0)} m away</span></div>`;
+        // Results list (click to zoom)
+        resultsEl.innerHTML = top.map((entry, idx) => {
+          const n = entry.way.tags.name || '(unnamed road)';
+          const extra = entry.estimated && entry.reason ? ` <span style="color:#666">— ${entry.reason}</span>` : '';
+          return `
+            <div class="result-item" data-idx="${idx}">
+              <b>${n}</b><br/>
+              Speed: <b>${entry.speedText}</b>${entry.estimated ? ' <span class="pill">estimated</span>' : ''}${extra}<br/>
+              <span style="color:#555">${entry.dist.toFixed(0)} m away</span>
+            </div>
+          `;
         }).join('');
+
+        // Hook up click handlers
+        resultsEl.querySelectorAll('.result-item').forEach(el => {
+          el.addEventListener('click', () => {
+            const idx = +el.getAttribute('data-idx');
+            const way = top[idx].way;
+            const bounds = L.polyline(way.geometry.map(g => [g.lat, g.lon])).getBounds();
+            map.fitBounds(bounds.pad(0.2));
+          });
+        });
+
       } catch (e) {
         console.error(e);
         status.textContent = 'Overpass query failed: ' + e.message;
       }
     }
 
-    function runFromTextbox(){
+    function runFromTextbox() {
       const coordInput = document.getElementById('latlon').value;
-      const radius = parseFloat(document.getElementById('rad').value) || 300;
+      const radius = Math.max(50, Math.min(2000, parseFloat(document.getElementById('rad').value) || 300));
       const parsed = parseLatLon(coordInput);
       if (!parsed.ok) {
         document.getElementById('status').textContent = parsed.message;
@@ -267,9 +515,9 @@
       document.getElementById(id).addEventListener('keydown', e => { if (e.key === 'Enter') runFromTextbox(); });
     });
 
-    // --- Map click: drop a red dot and look up ---
+    // Map click: drop a red dot and look up
     map.on('click', (e) => {
-      const radius = parseFloat(document.getElementById('rad').value) || 300;
+      const radius = Math.max(50, Math.min(2000, parseFloat(document.getElementById('rad').value) || 300));
       const lat = e.latlng.lat;
       const lon = e.latlng.lng;
       document.getElementById('latlon').value = lat.toFixed(6) + ', ' + lon.toFixed(6);
